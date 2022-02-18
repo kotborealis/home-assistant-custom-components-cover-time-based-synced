@@ -234,7 +234,7 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
         return "cover_timebased_synced_uuid_" + self._unique_id
 
     @property
-    def device_state_attributes(self):
+    def extra_state_attributes(self):
         """Return the device state attributes."""
         attr = {}
         if self._travel_time_down is not None:
