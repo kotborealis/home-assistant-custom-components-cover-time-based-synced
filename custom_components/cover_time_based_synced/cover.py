@@ -187,10 +187,10 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
             self.start_auto_updater()
         elif self._switch_open_state == "off" and self._switch_close_state == "on":
             if self._target_position != 100 and self._target_position != 0:
-                _LOGGER.debug(self._name + ': ' + 'open/close: on/off, closing to %d', self._target_position)
+                _LOGGER.debug(self._name + ': ' + 'open/close: off/on, closing to %d', self._target_position)
                 self.tc.start_travel(self._target_position)
             else:
-                _LOGGER.debug(self._name + ': ' + 'open/close: on/off, closing to predefined 0')
+                _LOGGER.debug(self._name + ': ' + 'open/close: off/on, closing to predefined 0')
                 self._target_position = 0
                 self.tc.start_travel_down()
             self.start_auto_updater()
