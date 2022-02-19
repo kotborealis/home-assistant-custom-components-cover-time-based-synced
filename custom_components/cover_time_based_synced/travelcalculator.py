@@ -99,7 +99,7 @@ class TravelCalculator:
         if self.travel_direction == TravelStatus.DIRECTION_UP:
             return self.current_position() >= self.travel_to_position
         elif self.travel_direction == TravelStatus.DIRECTION_DOWN:
-            return self.current_position <= self.travel_to_position
+            return self.current_position() <= self.travel_to_position
         else:
             return self.current_position() == self.travel_to_position
 
