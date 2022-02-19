@@ -132,6 +132,7 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
         self._target_position = 0
         self._processing_known_position = False
         self._unique_id = device_id
+        self._switching = False
 
         if name:
             self._name = name
@@ -167,8 +168,9 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
             return
 
         if self._switch_open_state == "off" and self._switch_close_state == "off":
-            _LOGGER.debug(self._name + ': ' + 'open/close: off/off, stopping')
-            self._handle_my_button()
+            if not self._switching:
+                _LOGGER.debug(self._name + ': ' + 'open/close: off/off, stopping')
+                self._handle_my_button()
         elif self._switch_open_state == "on" and self._switch_close_state == "on":
             _LOGGER.debug(self._name + ': ' + 'open/close: on/on, turning off both switches')
             self._handle_my_button()
@@ -194,6 +196,8 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
                 self._target_position = 0
                 self.tc.start_travel_down()
             self.start_auto_updater()
+
+        self._switching = False
             
 
     async def async_added_to_hass(self):
@@ -407,12 +411,14 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
         if command == "close_cover":
             cmd = "DOWN"
             self._state = False
+            self._switching = True
             await self.hass.services.async_call("homeassistant", "turn_off", {"entity_id": self._open_switch_entity_id}, False)
             await self.hass.services.async_call("homeassistant", "turn_on", {"entity_id": self._close_switch_entity_id}, False)
 
         elif command == "open_cover":
             cmd = "UP"
             self._state = True
+            self._switching = True
             await self.hass.services.async_call("homeassistant", "turn_off", {"entity_id": self._close_switch_entity_id}, False)
             await self.hass.services.async_call("homeassistant", "turn_on", {"entity_id": self._open_switch_entity_id}, False)
 
