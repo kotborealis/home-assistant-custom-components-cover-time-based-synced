@@ -158,6 +158,21 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
         self._switch_close_state = "off"
         self._switch_open_state = "off"
 
+    @property
+    def available(self) -> bool:
+        """Return availability."""
+        state_close = self.hass.states.get(self._close_switch_entity_id)
+        if state_close is None:
+            return False
+        if state_close.state in ["unavailable", "unknown"]:
+            return False
+        state_open = self.hass.states.get(self._open_switch_entity_id)
+        if state_open is None:
+            return False
+        if state_open.state in ["unavailable", "unknown"]:
+            return False
+        return True
+
     async def _handle_state_changed(self, event):
         if event.data.get("new_state") is None:
             return
@@ -413,7 +428,7 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
                 await self._async_handle_command(SERVICE_STOP_COVER)
             else:
                 if self._send_stop_at_ends:
-                    _LOGGER.debug(self._name + ': ' + 'auto_stop_if_necessary :: send_stop_at_ends :: calling stop command')
+                    _LOGGER.debug(self._name + f': auto_stop_if_necessary :: send_stop_at_ends :: calling stop command (delay {self._send_stop_at_ends_delay} seconds)')
                     await asyncio.sleep(self._send_stop_at_ends_delay)
                     await self._async_handle_command(SERVICE_STOP_COVER)
 
