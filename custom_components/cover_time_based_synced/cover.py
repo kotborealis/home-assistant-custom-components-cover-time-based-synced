@@ -4,6 +4,7 @@ import logging
 import voluptuous as vol
 
 from datetime import timedelta
+import asyncio
 
 from homeassistant.core import callback
 from homeassistant.helpers import entity_platform
@@ -35,7 +36,10 @@ CONF_NAME = 'name'
 CONF_ALIASES = 'aliases'
 CONF_TRAVELLING_TIME_DOWN = 'travelling_time_down'
 CONF_TRAVELLING_TIME_UP = 'travelling_time_up'
+CONF_DEADZONE_DOWN = 'deadzone_down'
+CONF_DEADZONE_UP = 'deadzone_up'
 CONF_SEND_STOP_AT_ENDS = 'send_stop_at_ends'
+CONF_SEND_STOP_AT_ENDS_DELAY = 'send_stop_at_ends_delay'
 DEFAULT_TRAVEL_TIME = 25
 DEFAULT_SEND_STOP_AT_ENDS = False
 
@@ -62,7 +66,10 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
                     vol.Optional(CONF_ALIASES, default=[]): vol.All(cv.ensure_list, [cv.string]),
                     vol.Optional(CONF_TRAVELLING_TIME_DOWN, default=DEFAULT_TRAVEL_TIME): cv.positive_int,
                     vol.Optional(CONF_TRAVELLING_TIME_UP, default=DEFAULT_TRAVEL_TIME): cv.positive_int,
+                    vol.Optional(CONF_DEADZONE_DOWN, default=0): cv.positive_int,
+                    vol.Optional(CONF_DEADZONE_UP, default=0): cv.positive_int,
                     vol.Optional(CONF_SEND_STOP_AT_ENDS, default=DEFAULT_SEND_STOP_AT_ENDS): cv.boolean,
+                    vol.Optional(CONF_SEND_STOP_AT_ENDS_DELAY, default=0): cv.positive_int,
                 }
             }
         ),
@@ -96,10 +103,13 @@ def devices_from_config(domain_config):
         name = config.pop(CONF_NAME)
         travel_time_down = config.pop(CONF_TRAVELLING_TIME_DOWN)
         travel_time_up = config.pop(CONF_TRAVELLING_TIME_UP)
+        deadzone_down = config.pop(CONF_DEADZONE_DOWN)
+        deadzone_up = config.pop(CONF_DEADZONE_UP)
         open_switch_entity_id = config.pop(CONF_OPEN_SWITCH_ENTITY_ID)
         close_switch_entity_id = config.pop(CONF_CLOSE_SWITCH_ENTITY_ID)
         send_stop_at_ends = config.pop(CONF_SEND_STOP_AT_ENDS)
-        device = CoverTimeBased(device_id, name, travel_time_down, travel_time_up, open_switch_entity_id, close_switch_entity_id, send_stop_at_ends)
+        send_stop_at_ends_delay = config.pop(CONF_SEND_STOP_AT_ENDS_DELAY)
+        device = CoverTimeBased(device_id, name, travel_time_down, travel_time_up, open_switch_entity_id, close_switch_entity_id, send_stop_at_ends, send_stop_at_ends_delay, deadzone_down, deadzone_up)
         devices.append(device)
     return devices
 
@@ -121,13 +131,16 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 
 class CoverTimeBased(CoverEntity, RestoreEntity):
-    def __init__(self, device_id, name, travel_time_down, travel_time_up, open_switch_entity_id, close_switch_entity_id, send_stop_at_ends):
+    def __init__(self, device_id, name, travel_time_down, travel_time_up, open_switch_entity_id, close_switch_entity_id, send_stop_at_ends, send_stop_at_ends_delay=0, deadzone_down=0, deadzone_up=0):
         """Initialize the cover."""
         self._travel_time_down = travel_time_down
         self._travel_time_up = travel_time_up
+        self._deadzone_down = deadzone_down
+        self._deadzone_up = deadzone_up
         self._open_switch_entity_id = open_switch_entity_id
         self._close_switch_entity_id = close_switch_entity_id
         self._send_stop_at_ends = send_stop_at_ends
+        self._send_stop_at_ends_delay = send_stop_at_ends_delay
         self._assume_uncertain_position = True 
         self._target_position = 0
         self._processing_known_position = False
@@ -144,6 +157,21 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
 
         self._switch_close_state = "off"
         self._switch_open_state = "off"
+
+    @property
+    def available(self) -> bool:
+        """Return availability."""
+        state_close = self.hass.states.get(self._close_switch_entity_id)
+        if state_close is None:
+            return False
+        if state_close.state in ["unavailable", "unknown"]:
+            return False
+        state_open = self.hass.states.get(self._open_switch_entity_id)
+        if state_open is None:
+            return False
+        if state_open.state in ["unavailable", "unknown"]:
+            return False
+        return True
 
     async def _handle_state_changed(self, event):
         if event.data.get("new_state") is None:
@@ -247,7 +275,7 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
     @property
     def current_cover_position(self):
         """Return the current position of the cover."""
-        return self.tc.current_position()
+        return self.position_to_deadzone(self.tc.current_position())
 
     @property
     def is_opening(self):
@@ -274,8 +302,9 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
     async def async_set_cover_position(self, **kwargs):
        """Move the cover to a specific position."""
        if ATTR_POSITION in kwargs:
-           self._target_position = kwargs[ATTR_POSITION]
-           _LOGGER.debug(self._name + ': ' + 'async_set_cover_position: %d', self._target_position)
+           deadzone_position = self.position_from_deadzone(kwargs[ATTR_POSITION])
+           _LOGGER.debug(self._name + ': ' + 'async_set_cover_position: %d (deadzone corrected: %d)', kwargs[ATTR_POSITION], deadzone_position)
+           self._target_position = deadzone_position
            await self.set_position(self._target_position)
 
     async def async_close_cover(self, **kwargs):
@@ -363,11 +392,13 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
     async def set_known_position(self, **kwargs):
         """We want to do a few things when we get a position"""
         position = kwargs[ATTR_POSITION]
+        deadzone_position = self.position_from_deadzone(position)
         confident = kwargs[ATTR_CONFIDENT] if ATTR_CONFIDENT in kwargs else False
         position_type = kwargs[ATTR_POSITION_TYPE] if ATTR_POSITION_TYPE in kwargs else ATTR_POSITION_TYPE_TARGET
         if position_type not in [ATTR_POSITION_TYPE_TARGET, ATTR_POSITION_TYPE_CURRENT]:
           raise ValueError(ATTR_POSITION_TYPE + " must be one of %s, %s", ATTR_POSITION_TYPE_TARGET,ATTR_POSITION_TYPE_CURRENT)
-        _LOGGER.debug(self._name + ': ' + 'set_known_position :: position  %d, confident %s, position_type %s, self.tc.is_traveling%s', position, str(confident), position_type, str(self.tc.is_traveling()))
+        _LOGGER.debug(self._name + ': ' + 'set_known_position :: position  %d (deadzone corrected %d), confident %s, position_type %s, self.tc.is_traveling%s', position, deadzone_position, str(confident), position_type, str(self.tc.is_traveling()))
+        position = deadzone_position
         self._assume_uncertain_position = not confident 
         self._processing_known_position = True
         if position_type == ATTR_POSITION_TYPE_TARGET:
@@ -397,7 +428,8 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
                 await self._async_handle_command(SERVICE_STOP_COVER)
             else:
                 if self._send_stop_at_ends:
-                    _LOGGER.debug(self._name + ': ' + 'auto_stop_if_necessary :: send_stop_at_ends :: calling stop command')
+                    _LOGGER.debug(self._name + f': auto_stop_if_necessary :: send_stop_at_ends :: calling stop command (delay {self._send_stop_at_ends_delay} seconds)')
+                    await asyncio.sleep(self._send_stop_at_ends_delay)
                     await self._async_handle_command(SERVICE_STOP_COVER)
 
     async def _async_handle_command(self, command, *args):
@@ -426,5 +458,40 @@ class CoverTimeBased(CoverEntity, RestoreEntity):
 
         # Update state of entity
         self.async_write_ha_state()
+    
+    def position_to_deadzone(self, position):
+        # dead-zone correction (show user)
+        # 1% deadzone_down + 98% actual range + 1% deadzone_up = 100%
+        real_range = 100 - self._deadzone_down - self._deadzone_up
+        real_range_percent = 100 - (1 if self._deadzone_down > 0 else 0) - (1 if self._deadzone_up > 0 else 0)
+        if position == 0:
+            return 0
+        elif position == 100:
+            return 100
+        elif self._deadzone_down > 0 and position <= self._deadzone_down:
+            # return 0~1% open
+            return 1
+        elif self._deadzone_up > 0 and position >= 100 - self._deadzone_up:
+            # return 99% open
+            return 99
+        else:
+            # 1% + corrected position
+            return int((1 if self._deadzone_down > 0 else 0) + (position - self._deadzone_down) * real_range_percent / real_range)
+    
+    def position_from_deadzone(self, position):
+        # dead-zone correction (send to cover)
+        # 1% deadzone_down + 98% actual range + 1% deadzone_up = 100%
+        real_range = 100 - self._deadzone_down - self._deadzone_up
+        real_range_percent = 100 - (1 if self._deadzone_down > 0 else 0) - (1 if self._deadzone_up > 0 else 0)
+        if position == 0:
+            return 0
+        elif position == 100:
+            return 100
+        elif self._deadzone_down > 0 and position <= 1:
+            return self._deadzone_down
+        elif self._deadzone_up > 0 and position >= 99:
+            return 100 - self._deadzone_up
+        else:            
+            return int(self._deadzone_down + (position - (1 if self._deadzone_down > 0 else 0)) * real_range / real_range_percent)
 
 # END
